@@ -1,0 +1,9 @@
+*.vtk
+*.vtu
+*.asv
+*.m~
+.DS_Store
+*.pdf
+*.fig
+
+
