@@ -2,7 +2,7 @@ include("bernstein.jl")
 using Plots
 using LaTeXStrings
 using WriteVTK
-plotly()
+plotlyjs()
 
 mutable struct Mesh
     elemVertex::Array{Float64,2}
@@ -261,7 +261,7 @@ function plotBasisParam(mesh::Mesh)
 end
 
 """
-Plots the approximate solution
+Plots the computed solution
 """
 function plotSol(mesh::Mesh, sol0, fileName::String)
 
@@ -347,6 +347,103 @@ function plotSol(mesh::Mesh, sol0, fileName::String)
         #Output data to VTK
         vtkfile = vtk_grid(fileName, pointsVTK, meshCells)
         vtkfile["U", VTKPointData()] = pointValVTK
+        vtk_save(vtkfile)
+        println("Output written to $fileName.vtk")
+    end
+
+end
+
+"""
+Plots the computed solution for elasticity
+"""
+function plotSolElast(mesh::Mesh, Cmat::Array{Float64}, sol0, fileName::String)    
+    if length(degP)==2
+        #Set the order of points for VTK_QUADRATIC_QUAD  w.r.t. a 3x3 grid from Figure 3 of
+        # https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf
+        VTKOrder = [1, 3, 9, 7, 2, 6, 8, 4]
+        numPtsElem = 3
+        evalPtsU = LinRange(-1, 1, numPtsElem)
+        evalPtsV = LinRange(-1, 1, numPtsElem)
+        Buv, dBdu, dBdv = bernsteinBasis2D(collect(evalPtsU), collect(evalPtsV), mesh.degP)
+        pointsVTK = zeros(2, mesh.numElem*8)
+        pointDispVTK = zeros(2, mesh.numElem*8)
+        pointStressVTK = zeros(3, mesh.numElem*8)
+        pointStressVMVTK = zeros(mesh.numElem*8)
+        localPoints = zeros(2, 9)
+        localPointDisp = zeros(2, 9)
+        localPointStress = zeros(3, 9)
+        localPointStressVM = zeros(1, 9)
+        meshCells = Array{MeshCell, 1}(undef, mesh.numElem)
+        for iElem in 1:mesh.numElem
+            curNodes = mesh.elemNode[iElem]
+            numNodes = length(curNodes)
+            curNodesXY = reshape(hcat(2*curNodes.-1, 2*curNodes)', 2*numNodes)
+            uMin = mesh.elemVertex[iElem, 1]
+            uMax = mesh.elemVertex[iElem, 3]
+            vMin = mesh.elemVertex[iElem, 2]
+            vMax = mesh.elemVertex[iElem, 4]
+            cpts = mesh.controlPoints[1:2, curNodes]
+            wgts = mesh.weights[curNodes]
+            localPtCounter = 0
+            B = zeros(2*numNodes,3)
+            for jPt = 1:numPtsElem
+                for iPt = 1:numPtsElem
+                    #compute the (B-)spline basis functions and derivatives with Bezier extraction
+                    N_mat = mesh.C[iElem] * Buv[iPt, jPt, :]
+                    dN_du = mesh.C[iElem] * dBdu[iPt, jPt, :] * 2/(uMax-uMin)
+                    dN_dv = mesh.C[iElem] * dBdv[iPt, jPt, :] * 2/(vMax-vMin)
+                    
+                    #compute the rational basis
+                    RR = N_mat.* wgts
+                    dRdu = dN_du.* wgts
+                    dRdv = dN_dv.* wgts
+                    w_sum = sum(RR)
+                    dw_xi = sum(dRdu)
+                    dw_eta = sum(dRdv)
+                    dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
+                    dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
+                    
+                    #compute the derivatives w.r.t to the physical space
+                    dR = [dRdu'; dRdv']
+                    dxdxi = dR * cpts'
+                    RR /= w_sum
+                    phys_pt = cpts*RR
+                    if abs(det(dxdxi))<1e-12
+                        @warn "Singularity in mapping at $phys_pt"
+                        dR = pinv(dxdxi)*dR
+                    else
+                        dR = dxdxi\dR
+                    end
+                    Jac_par_phys = det(dxdxi)
+                                        
+                    B[1:2:2*numNodes-1,1] = dR[1,:]
+                    B[2:2:2*numNodes,2] = dR[2,:]
+                    B[1:2:2*numNodes-1,3] = dR[2,:]
+                    B[2:2:2*numNodes,3] = dR[1,:]
+                    localPtCounter += 1
+                    localPoints[:, localPtCounter ]=phys_pt
+                    solValX = RR'*sol0[2*curNodes.-1]
+                    solValY = RR'*sol0[2*curNodes]
+                    localPointDisp[:, localPtCounter]=[solValX, solValY]
+                    stressVect = Cmat*B'*sol0[curNodesXY]                    
+                    localPointStress[:, localPtCounter] = stressVect
+                    stressVM = sqrt(stressVect[1]^2 - stressVect[1]*stressVect[2] + stressVect[2]^2 
+                                    +3*stressVect[3]^2)                                   
+                    localPointStressVM[localPtCounter] = stressVM
+                end
+            end
+            ptRange = (iElem-1)*8+1:iElem*8
+            pointsVTK[:, ptRange] = localPoints[:, VTKOrder]
+            pointDispVTK[:, ptRange] = localPointDisp[:, VTKOrder]
+            pointStressVTK[:, ptRange] = localPointStress[:, VTKOrder]
+            pointStressVMVTK[ptRange] = localPointStressVM[VTKOrder]
+            meshCells[iElem] = MeshCell(VTKCellTypes.VTK_QUADRATIC_QUAD, collect(ptRange))
+        end
+        #Output data to VTK
+        vtkfile = vtk_grid(fileName, pointsVTK, meshCells)      
+        vtkfile["U", VTKPointData()] = pointDispVTK
+        vtkfile["Stress", VTKPointData()] = pointStressVTK
+        vtkfile["StressVM"] = pointStressVMVTK        
         vtk_save(vtkfile)
         println("Output written to $fileName.vtk")
     end
@@ -444,6 +541,110 @@ function plotSolError(mesh::Mesh, sol0, exactSol::Function, fileName::String)
         #Output data to VTK
         vtkfile = vtk_grid(fileName, pointsVTK, meshCells)
         vtkfile["U-U_h", VTKPointData()] = pointValVTK
+        vtk_save(vtkfile)
+        println("Output written to $fileName.vtk")
+    end
+end
+
+"""
+Plots the error in the approximate solution
+"""
+function plotSolErrorElast(mesh::Mesh, Cmat::Array{Float64}, sol0, exactSolDisp::Function, exactSolStress::Function, fileName::String)
+    if length(degP)==2
+         #Set the order of points for VTK_QUADRATIC_QUAD  w.r.t. a 3x3 grid from Figure 3 of
+        # https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf
+        VTKOrder = [1, 3, 9, 7, 2, 6, 8, 4]
+        numPtsElem = 3
+        evalPtsU = LinRange(-1, 1, numPtsElem)
+        evalPtsV = LinRange(-1, 1, numPtsElem)
+        Buv, dBdu, dBdv = bernsteinBasis2D(collect(evalPtsU), collect(evalPtsV), mesh.degP)
+        pointsVTK = zeros(2, mesh.numElem*8)
+        pointDispVTK = zeros(2, mesh.numElem*8)
+        pointStressVTK = zeros(3, mesh.numElem*8)
+        pointStressVMVTK = zeros(mesh.numElem*8)
+        localPoints = zeros(2, 9)
+        localPointDisp = zeros(2, 9)
+        localPointStress = zeros(3, 9)
+        localPointStressVM = zeros(1, 9)
+        meshCells = Array{MeshCell, 1}(undef, mesh.numElem)
+        for iElem in 1:mesh.numElem
+            curNodes = mesh.elemNode[iElem]
+            numNodes = length(curNodes)
+            curNodesXY = reshape(hcat(2*curNodes.-1, 2*curNodes)', 2*numNodes)
+            uMin = mesh.elemVertex[iElem, 1]
+            uMax = mesh.elemVertex[iElem, 3]
+            vMin = mesh.elemVertex[iElem, 2]
+            vMax = mesh.elemVertex[iElem, 4]
+            cpts = mesh.controlPoints[1:2, curNodes]
+            wgts = mesh.weights[curNodes]
+            localPtCounter = 0
+            for jPt = 1:numPtsElem
+                for iPt = 1:numPtsElem
+                    #compute the (B-)spline basis functions and derivatives with Bezier extraction
+                    N_mat = mesh.C[iElem] * Buv[iPt, jPt, :]
+                    dN_du = mesh.C[iElem] * dBdu[iPt, jPt, :] * 2/(uMax-uMin)
+                    dN_dv = mesh.C[iElem] * dBdv[iPt, jPt, :] * 2/(vMax-vMin)
+                    
+                    #compute the rational basis
+                    RR = N_mat.* wgts
+                    dRdu = dN_du.* wgts
+                    dRdv = dN_dv.* wgts
+                    w_sum = sum(RR)
+                    dw_xi = sum(dRdu)
+                    dw_eta = sum(dRdv)
+                    dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
+                    dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
+                    
+                    #compute the derivatives w.r.t to the physical space
+                    dR = [dRdu'; dRdv']
+                    dxdxi = dR * cpts'
+                    RR /= w_sum
+                    phys_pt = cpts*RR
+                    if abs(det(dxdxi))<1e-12
+                        @warn "Singularity in mapping at $phys_pt"
+                        dR = pinv(dxdxi)*dR
+                    else
+                        dR = dxdxi\dR
+                    end
+                    Jac_par_phys = det(dxdxi)
+                    
+                    B = zeros(2*numNodes,3);
+                    B[1:2:2*numNodes-1,1] = dR[1,:]
+                    B[2:2:2*numNodes,2] = dR[2,:]
+                    B[1:2:2*numNodes-1,3] = dR[2,:]
+                    B[2:2:2*numNodes,3] = dR[1,:]
+                    localPtCounter += 1
+                    localPoints[:, localPtCounter ]=phys_pt
+                    solValX = RR'*sol0[2*curNodes.-1]
+                    solValY = RR'*sol0[2*curNodes]
+
+                    #evaluate the exact displacement and stresses
+                    exSolVal = exactSolDisp(phys_pt[1], phys_pt[2])                    
+                    exSolStressVal = exactSolStress(phys_pt[1], phys_pt[2])
+                    exStressVM = sqrt(exSolStressVal[1]^2 - exSolStressVal[1]*exSolStressVal[2] + exSolStressVal[2]^2 
+                                    +3*exSolStressVal[3]^2)
+
+                    #compute the errors (exact - approximate)
+                    localPointDisp[:, localPtCounter]=[exSolVal[1]-solValX, exSolVal[2]-solValY]
+                    stressVect = Cmat*B'*sol0[curNodesXY]                    
+                    localPointStress[:, localPtCounter] = exSolStressVal - stressVect
+                    stressVM = sqrt(stressVect[1]^2 - stressVect[1]*stressVect[2] + stressVect[2]^2 
+                                    +3*stressVect[3]^2)                                   
+                    localPointStressVM[localPtCounter] = exStressVM - stressVM
+                end
+            end
+            ptRange = (iElem-1)*8+1:iElem*8
+            pointsVTK[:, ptRange] = localPoints[:, VTKOrder]
+            pointDispVTK[:, ptRange] = localPointDisp[:, VTKOrder]
+            pointStressVTK[:, ptRange] = localPointStress[:, VTKOrder]
+            pointStressVMVTK[ptRange] = localPointStressVM[VTKOrder]
+            meshCells[iElem] = MeshCell(VTKCellTypes.VTK_QUADRATIC_QUAD, collect(ptRange))
+        end
+        #Output data to VTK
+        vtkfile = vtk_grid(fileName, pointsVTK, meshCells)      
+        vtkfile["error U", VTKPointData()] = pointDispVTK
+        vtkfile["error Stress", VTKPointData()] = pointStressVTK
+        vtkfile["error StressVM"] = pointStressVMVTK        
         vtk_save(vtkfile)
         println("Output written to $fileName.vtk")
     end

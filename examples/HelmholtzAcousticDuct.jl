@@ -35,8 +35,6 @@ lengthy = 1.
 degP = [3, 3]
 numSubdiv = 80
 nrb = nrbsquare(cornerLowerLeft, lengthx, lengthy, degP, numSubdiv)
-
-IEN, elemVertex = makeIEN(nrb.knots, numSubdiv^2, degP)
 IGAmesh = genMesh(nrb)
 #plotBasisParam(IGAmesh)
 

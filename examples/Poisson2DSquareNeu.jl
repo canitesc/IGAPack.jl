@@ -30,7 +30,6 @@ nrb = nrbsquare(cornerLowerLeft, lengthx, lengthy, degP, numSubdiv)
 #plt = nrbctrlplot(nrb)
 #plt = nrbkntplot(nrb)
 #display(plt)
-IEN, elemVertex = makeIEN(nrb.knots, numSubdiv^2, degP)
 IGAmesh = genMesh(nrb)
 #plotBasisParam(IGAmesh)
 

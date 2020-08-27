@@ -20,6 +20,12 @@ struct BoundaryIndex2D
     right::Array{Int64, 1}
 end
 
+struct Material2D
+    Emod::Float64
+    nu::Float64
+    Cmat::Array{Float64,2}
+end
+
 """
 Constructor for Boundary2D which sets α=0
 """
@@ -147,6 +153,89 @@ function assemble_stiff2D(mesh::Mesh, a0::Function, gauss_rule::Array{GaussQuad,
     end
     @show domainArea
     stiff = sparse(II, JJ, S, mesh.numBasis, mesh.numBasis)
+    return stiff
+end
+
+"""
+Aseembles the stiffness matrix for 2D Elasticity Kₑ = ∫ B^T*C*B dΩ
+"""
+function assemble_stiff_elast2D(mesh::Mesh, Cmat::Array{Float64,2}, gauss_rule::Array{GaussQuad,1})
+    Buv, dBdu, dBdv = bernsteinBasis2D(gauss_rule[1].nodes, gauss_rule[2].nodes, mesh.degP)
+    numGaussU = length(gauss_rule[1].nodes)
+    numGaussV = length(gauss_rule[2].nodes)
+    #allocate memory for the triplet arrays
+    indexCounter = 0
+    for iElem=1:mesh.numElem
+        numNodes = length(mesh.elemNode[iElem])
+        indexCounter += 4*numNodes^2
+    end
+    II = zeros(Int64, indexCounter)
+    JJ = zeros(Int64, indexCounter)
+    S = zeros(indexCounter)
+
+    indexCounter = 0
+    domainArea = 0
+    for iElem = 1:mesh.numElem
+        uMin = mesh.elemVertex[iElem, 1]
+        uMax = mesh.elemVertex[iElem, 3]
+        vMin = mesh.elemVertex[iElem, 2]
+        vMax = mesh.elemVertex[iElem, 4]
+        Jac_ref_par = (uMax-uMin)*(vMax-vMin)/4
+
+        #compute the rational spline basis
+        curNodes = mesh.elemNode[iElem]
+        numNodes = length(curNodes)
+        curNodesXY = reshape(hcat(2*curNodes.-1, 2*curNodes)', 2*numNodes)
+        cpts = mesh.controlPoints[1:2, curNodes]
+        wgts = mesh.weights[curNodes]
+        localStiff = zeros(2*numNodes, 2*numNodes)
+
+        for jGauss = 1:numGaussV
+            for iGauss = 1:numGaussU
+                #compute the (B-)spline basis functions and derivatives with Bezier extraction
+                N_mat = mesh.C[iElem] * Buv[iGauss, jGauss, :]
+                dN_du = mesh.C[iElem] * dBdu[iGauss, jGauss, :] * 2/(uMax-uMin)
+                dN_dv = mesh.C[iElem] * dBdv[iGauss, jGauss, :] * 2/(vMax-vMin)
+
+                #compute the rational basis
+                RR = N_mat.* wgts
+                dRdu = dN_du.* wgts
+                dRdv = dN_dv.* wgts
+                w_sum = sum(RR)
+                dw_xi = sum(dRdu)
+                dw_eta = sum(dRdv)
+                dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
+                dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
+                
+                #compute the derivatives w.r.t to the physical space
+                dR = [dRdu'; dRdv']
+                dxdxi = dR * cpts'
+                dR = dxdxi\dR
+                Jac_par_phys = det(dxdxi)
+                RR /= w_sum
+                phys_pt = cpts*RR
+
+                B = zeros(2*numNodes,3);
+                B[1:2:2*numNodes-1,1] = dR[1,:]
+                B[2:2:2*numNodes,2] = dR[2,:]
+                B[1:2:2*numNodes-1,3] = dR[2,:]
+                B[2:2:2*numNodes,3] = dR[1,:]
+
+                localArea = Jac_par_phys * Jac_ref_par *
+                    gauss_rule[1].weights[iGauss] * gauss_rule[2].weights[jGauss]
+                localStiff += localArea *  (B*Cmat*B')
+                domainArea += localArea
+            end
+        end
+        II[indexCounter+1:indexCounter+4*numNodes^2] = repeat(curNodesXY, 2*numNodes)
+        JJ[indexCounter+1:indexCounter+4*numNodes^2] = reshape(repeat(curNodesXY',
+                                                    2*numNodes, 1), 4*numNodes^2)
+        S[indexCounter+1:indexCounter+4*numNodes^2] = reshape(localStiff, 4*numNodes^2)
+        indexCounter += 4*numNodes^2
+
+    end
+    @show domainArea
+    stiff = sparse(II, JJ, S, 2*mesh.numBasis, 2*mesh.numBasis)
     return stiff
 end
 
@@ -455,19 +544,125 @@ function applyNeumannScalar2D(mesh::Mesh, rhs, elem_list, direction::String,
 
             #Jacobian of face mapping
             if direction=="right" || direction=="left"
-                eJac = dxdxi[1,2]^2 + dxdxi[2,2]^2
+                eJac = dxdxi[2,1]^2 + dxdxi[2,2]^2
             else
-                eJac = dxdxi[1,1]^2 + dxdxi[2,1]^2
+                eJac = dxdxi[1,1]^2 + dxdxi[1,2]^2
             end
             Jac_par_phys = sqrt(eJac)
             dR = dxdxi\dR
             RR /= w_sum
             phys_pt = cpts*RR
             gFunc = op_val(phys_pt[1], phys_pt[2])
-            localRhs += RR[sctr].*gFunc.*Jac_ref_par.*Jac_par_phys.*quad_rule_1d.weights[iGauss]
-            domainLength += Jac_par_phys * Jac_ref_par * quad_rule_1d.weights[iGauss]
+            localLength = Jac_par_phys * Jac_ref_par * quad_rule_1d.weights[iGauss]
+            localRhs += RR[sctr].*gFunc.*localLength
+            domainLength += localLength
         end
         rhs[curNodes[sctr]] += localRhs
+    end
+    @show domainLength
+    return rhs
+end
+
+"""
+Apply the Neumann boundary conditions to the RHS for a 2D NURBS geometry, elasticity
+solution field
+"""
+function applyNeumannElast2D(mesh::Mesh, rhs, elem_list, direction::String,
+                                quad_rule_1d::GaussQuad, op_val::Function)
+    #Select the Gauss/edge points for evaluating the  1D the basis functions
+    #select the scatter vector corresponding to the edge DOFs
+    index_all = getBoundaryIndices(mesh.degP)
+    numNodesEdge = length(quad_rule_1d.nodes)
+    if direction == "right"
+        pts_u = [1.]
+        pts_v = quad_rule_1d.nodes
+        sctr = index_all.right
+    elseif direction == "left"
+        pts_u = [-1.]
+        pts_v = quad_rule_1d.nodes
+        sctr = index_all.left
+    elseif direction == "down"
+        pts_u = quad_rule_1d.nodes
+        pts_v = [-1.]
+        sctr = index_all.down
+    elseif direction == "up"
+        pts_u = quad_rule_1d.nodes
+        pts_v = [1.]
+        sctr = index_all.up
+    else
+        error("Wrong direction given")
+    end
+
+    #Form the 2D tensor product of the basis functions
+    Buv, dBdu, dBdv = bernsteinBasis2D(pts_u, pts_v, mesh.degP)
+
+    #Evaluate the Neumann integral on each element
+    domainLength = 0.
+    for iElem in elem_list
+        uMin = mesh.elemVertex[iElem, 1]
+        uMax = mesh.elemVertex[iElem, 3]
+        vMin = mesh.elemVertex[iElem, 2]
+        vMax = mesh.elemVertex[iElem, 4]
+        if direction == "right" || direction == "left"
+            Jac_ref_par = (vMax-vMin)/2
+        else
+            Jac_ref_par = (uMax-uMin)/2
+        end
+
+        #compute the rational spline basis
+        curNodes = mesh.elemNode[iElem]
+        numNodes = length(curNodes)
+        curNodesXY = reshape(hcat(2*curNodes[sctr].-1, 2*curNodes[sctr])', 2*numNodesEdge)
+
+        cpts = mesh.controlPoints[1:2, curNodes]
+        wgts = mesh.weights[curNodes]
+        localRhs = zeros(2*numNodesEdge)
+        for iGauss = 1:length(quad_rule_1d.nodes)
+            #compute the (B-)spline basis functions and derivatives with Bezier extraction
+            if direction == "right" || direction == "left"
+                N_mat = mesh.C[iElem] * Buv[1, iGauss, :]
+                dN_du = mesh.C[iElem] * dBdu[1, iGauss, :] * 2/(uMax-uMin)
+                dN_dv = mesh.C[iElem] * dBdv[1, iGauss, :] * 2/(vMax-vMin)
+            else
+                N_mat = mesh.C[iElem] * Buv[iGauss, 1, :]
+                dN_du = mesh.C[iElem] * dBdu[iGauss, 1, :] * 2/(uMax-uMin)
+                dN_dv = mesh.C[iElem] * dBdv[iGauss, 1, :] * 2/(vMax-vMin)
+            end
+
+            #compute the rational basis
+            RR = N_mat.* wgts
+            dRdu = dN_du.* wgts
+            dRdv = dN_dv.* wgts
+            w_sum = sum(RR)
+            dw_xi = sum(dRdu)
+            dw_eta = sum(dRdv)
+            dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
+            dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
+
+            #compute the derivatives w.r.t to the physical space
+            dR = [dRdu'; dRdv']
+            dxdxi = dR * cpts'
+
+            #Jacobian of face mapping
+            if direction=="right" || direction=="left"
+                eJac = dxdxi[2,1]^2 + dxdxi[2,2]^2
+            else
+                eJac = dxdxi[1,1]^2 + dxdxi[1,2]^2
+            end
+            Jac_par_phys = sqrt(eJac)
+
+            dR = dxdxi\dR
+            RR /= w_sum
+            phys_pt = cpts*RR
+
+            gFunc = op_val(phys_pt[1], phys_pt[2])
+            localLength = Jac_par_phys * Jac_ref_par * quad_rule_1d.weights[iGauss]
+            localRhs[1:2:end-1] += RR[sctr].*gFunc[1].*localLength
+            localRhs[2:2:end] += RR[sctr].*gFunc[2].*localLength
+            domainLength += localLength
+
+        end
+        rhs[curNodesXY] += localRhs
     end
     @show domainLength
     return rhs
@@ -583,11 +778,91 @@ function applyRobinScalar2D(mesh::Mesh, lhs, rhs, elem_list, direction::String,
     return lhs, rhs
 end
 
-
 """
 Apply the boundary conditions to a linear system for a 2D
-NURBS geometry
+NURBS geometry and elasticity problems
 """
+function applyBCnurbsElast(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rhs,
+                            bcdof_all, elem_all, quad_rule)
+    #collect the dofs and values corresponding to the boundary
+    bcdof = Array{Int64,1}(undef, 0)
+    bcval = Array{Float64,1}(undef, 0)
+    #assume homogeneous boundary conditions
+    evalPt = [0.,0.]
+    for i=1:length(bound_cond)
+        if bound_cond[i].type=="Dirichlet"
+            if bound_cond[i].side=="Down"
+                #check x-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[1]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.down.-1)
+                end
+                #check y-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[2]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.down)
+                end
+            end
+            if bound_cond[i].side=="Up"
+                #check x-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[1]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.up.-1)
+                end
+                #check y-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[2]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.up)
+                end
+            end
+            if bound_cond[i].side=="Left"
+                #check x-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[1]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.left.-1)
+                end
+                #check y-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[2]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.left)
+                end
+            end
+            if bound_cond[i].side=="Right"
+                #check x-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[1]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.right.-1)
+                end
+                #check y-direction
+                if bound_cond[i].op_val(evalPt[1], evalPt[2])[2]!=undef
+                    bcdof = vcat(bcdof, 2*bcdof_all.right)
+                end
+            end
+        elseif bound_cond[i].type=="Neumann"
+            if bound_cond[i].side=="Down"
+                rhs = applyNeumannElast2D(mesh, rhs, elem_all.down, "down",
+                                        quad_rule[1], bound_cond[i].op_val)
+            end
+            if bound_cond[i].side=="Up"
+                rhs = applyNeumannElast2D(mesh, rhs, elem_all.up, "up",
+                                        quad_rule[1], bound_cond[i].op_val)
+            end
+            if bound_cond[i].side=="Left"
+                rhs = applyNeumannElast2D(mesh, rhs, elem_all.left, "left",
+                                        quad_rule[2], bound_cond[i].op_val)
+            end
+            if bound_cond[i].side=="Right"
+                rhs = applyNeumannElast2D(mesh, rhs, elem_all.right, "right",
+                                        quad_rule[2], bound_cond[i].op_val)
+            end
+        else
+            error("Boundary condition type not implemented")
+        end
+    end
+    unique!(bcdof)
+    @show bcdof
+    bcval = zero(bcdof)
+    rhs = rhs - lhs[:,bcdof]*bcval
+    rhs[bcdof] = bcval
+    lhs[bcdof, :] .= 0.
+    lhs[:, bcdof] .= 0.
+    lhs[bcdof, bcdof] = sparse(I, length(bcdof), length(bcdof))
+    return lhs, rhs
+end
+#
 function applyBCnurbs(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rhs,
                         bcdof_all, elem_all, quad_rule)
     #collect the dofs and values corresponding to the boundary
@@ -649,8 +924,6 @@ function applyBCnurbs(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rhs,
     end
     unique!(bcdof)
     bcval = zero(bcdof)
-    #@show bcdof
-    #@show bcval
     rhs = rhs - lhs[:,bcdof]*bcval
     rhs[bcdof] = bcval
     lhs[bcdof, :] .= 0.
@@ -735,6 +1008,104 @@ function compErrorNorm(mesh::Mesh, sol0, exactSol::Function, derivExactSol::Func
                 funValue = a0(phys_pt[1], phys_pt[2])
                 h1NormErr += localArea * funValue *sum((dXexSolVal.-dXsolVal).^2)
                 h1NormSol += localArea * funValue *sum((dXexSolVal).^2)
+            end
+        end
+    end
+    relL2Err = sqrt(l2NormErr/l2NormSol)
+    relH1Err = sqrt(h1NormErr/h1NormSol)
+    return real(relL2Err), real(relH1Err)
+end
+
+function compErrorNormElast(mesh::Mesh, Cmat, sol0, exactSolDisp::Function, exactSolStress::Function,
+                         gauss_rule::Array{GaussQuad,1})
+    invC = inv(Cmat)
+    B_u, dB_u = bernsteinBasis(gauss_rule[1].nodes, mesh.degP[1])
+    B_v, dB_v = bernsteinBasis(gauss_rule[2].nodes, mesh.degP[2])
+    domainArea = 0
+
+    numGaussU = length(gauss_rule[1].nodes)
+    numGaussV = length(gauss_rule[2].nodes)
+    basisCounter = 0
+    Buv = zeros(numGaussU, numGaussV, (degP[1]+1)*(degP[2]+1))
+    dBdu = zeros(numGaussU, numGaussV, (degP[1]+1)*(degP[2]+1))
+    dBdv = zeros(numGaussU, numGaussV, (degP[1]+1)*(degP[2]+1))
+
+    for j=1:degP[2]+1
+        for i=1:degP[1]+1
+            basisCounter += 1
+            Buv[:,:,basisCounter] = B_u[:,i]*B_v[:,j]'
+            dBdu[:,:,basisCounter] = dB_u[:,i]*B_v[:,j]'
+            dBdv[:,:,basisCounter] = B_u[:,i]*dB_v[:,j]'
+        end
+    end
+    l2NormErr = 0.
+    l2NormSol = 0.
+    h1NormErr = 0.
+    h1NormSol = 0.
+    for iElem = 1:mesh.numElem
+        uMin = mesh.elemVertex[iElem, 1]
+        uMax = mesh.elemVertex[iElem, 3]
+        vMin = mesh.elemVertex[iElem, 2]
+        vMax = mesh.elemVertex[iElem, 4]
+        Jac_ref_par = (uMax-uMin)*(vMax-vMin)/4
+
+        #compute the rational spline basis
+        curNodes = mesh.elemNode[iElem]
+        numNodes = length(curNodes)
+        curNodesXY = reshape(hcat(2*curNodes.-1, 2*curNodes)', 2*numNodes)
+        cpts = mesh.controlPoints[1:2, curNodes]
+        wgts = mesh.weights[curNodes]
+        localRhs = zeros(numNodes)
+        for jGauss = 1:numGaussV
+            for iGauss = 1:numGaussU
+                #compute the (B-)spline basis functions and derivatives with Bezier extraction
+                N_mat = mesh.C[iElem] * Buv[iGauss, jGauss, :]
+                dN_du = mesh.C[iElem] * dBdu[iGauss, jGauss, :] * 2/(uMax-uMin)
+                dN_dv = mesh.C[iElem] * dBdv[iGauss, jGauss, :] * 2/(vMax-vMin)
+
+                #compute the rational basis
+                RR = N_mat.* wgts
+                dRdu = dN_du.* wgts
+                dRdv = dN_dv.* wgts
+                w_sum = sum(RR)
+                dw_xi = sum(dRdu)
+                dw_eta = sum(dRdv)
+
+                dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
+                dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
+                #compute the derivatives w.r.t to the physical space
+                dR = [dRdu'; dRdv']
+
+                dxdxi = dR * cpts'
+                if abs(det(dxdxi))<1e-12
+                    @warn "Singularity in mapping at $phys_pt"
+                    dR = pinv(dxdxi)*dR
+                else
+                    dR = dxdxi\dR
+                end
+                Jac_par_phys = det(dxdxi)
+                RR /= w_sum
+                phys_pt = cpts*RR
+
+                B = zeros(2*numNodes,3);
+                B[1:2:2*numNodes-1,1] = dR[1,:]
+                B[2:2:2*numNodes,2] = dR[2,:]
+                B[1:2:2*numNodes-1,3] = dR[2,:]
+                B[2:2:2*numNodes,3] = dR[1,:]
+                solValX = RR'*sol0[2*curNodes.-1]
+                solValY = RR'*sol0[2*curNodes]
+                stressVect = Cmat*B'*sol0[curNodesXY]   
+               
+                exSolVal = exactSolDisp(phys_pt[1], phys_pt[2])
+                exStressVal = exactSolStress(phys_pt[1], phys_pt[2])
+                localArea = Jac_par_phys * Jac_ref_par *
+                    gauss_rule[1].weights[iGauss] * gauss_rule[2].weights[jGauss]
+                domainArea += localArea
+                l2NormErr += localArea * ((exSolVal[1]-solValX)^2 + (exSolVal[2]-solValY)^2)
+                l2NormSol += localArea * (exSolVal[1]^2 + exSolVal[2]^2)
+                
+                h1NormErr += localArea * (exStressVal-stressVect)'*invC*(exStressVal-stressVect)
+                h1NormSol += localArea * exStressVal'*invC*exStressVal
             end
         end
     end
