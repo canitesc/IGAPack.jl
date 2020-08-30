@@ -335,11 +335,17 @@ function nrbextract(srf::NURBS)
     return crvs
 end
 
-function nrbline(p1, p2)
-    coefs = [zeros(3,2); ones(1,2)]
-    coefs[1:length(p1),1] .= p1
-    coefs[1:length(p2),2] .= p2
-    line = nrbmak(coefs, [[0,0,1,1]])
+function nrbline(points...)
+    numPts = length(points)
+    if numPts==1
+        error("More than one point should be specfified")
+    end
+    coefs = [zeros(3,numPts); ones(1,numPts)]
+    for iPt = 1:numPts
+        coefs[1:length(points[iPt]),iPt] .= points[iPt]
+    end
+    knots = vcat(0, LinRange(0,1,numPts), 1)
+    line = nrbmak(coefs, [knots])
     return line
 end
 
@@ -583,6 +589,32 @@ function nrbkntins(nurbs::NURBS, iknots::AbstractArray)
     inurbs = nrbmak(coefs, knots)
     return inurbs
 end
+
+"""
+Joins two 1D NURBS objects (NURBS curves), nurbsA and nurbsB, with matching end control points. The
+output is a single NURBS curve with scaled and normalized knot vector
+"""
+function nrbjoin(nurbsA::NURBS, nurbsB::NURBS)
+    coefsA = nurbsA.coefs
+    coefsB = nurbsB.coefs
+    knotsA = nurbsA.knots[1]
+    knotsB = nurbsB.knots[1]
+    tol_eq = 1e-10
+    if norm(coefsA[:,end]-coefsB[:,1])>tol_eq
+        error("The two NURBS objects do not appear to have a common endpoint")
+    end
+    coefs_new = hcat(coefsA, coefsB[:,2:end])
+    knotsB .+= nurbsA.knots[1][end]
+    knots_new = vcat(knotsA, knotsB[2:end])
+    #linearly map knots_new to the interval [0,1]
+    knots_new = (knots_new .- knots_new[1])./(knots_new[end]-knots_new[1])
+    nrb_new = nrbmak(coefs_new, [knots_new])
+    return nrb_new
+end
+
+
+
+
 
 function bspdegelev(d, c, k, t)
     mc, nc = size(c)
@@ -1063,12 +1095,15 @@ function nrbrevolve(curve::NURBS, pnt, vec)
     return surf
 end
 
-#end
+"""
+Refine a given knot vector by dividing each interval uniformly,
+             maintaining the continuity in previously existing knots.
+"""
 function kntrefine(knots, n_sub, degree, regularity)
     if length(n_sub)!=length(degree) || length(n_sub)!=length(regularity) ||
         length(n_sub)!=length(knots)
         error("kntrefine: n_sub, degree and regularity must have the same length
-            as the number of knot vector")
+            as the number of knot vectors")
     end
     rknots = Array{Array}(undef, length(knots))
     new_knots = Array{Array}(undef, length(knots))
@@ -1125,3 +1160,18 @@ function nrbsquare(corner, lengthx, lengthy, degree, nsubdiv)
     srf = nrbkntins(srf, new_knots)
     return srf
 end
+
+"""
+Reverse the evaluation direction of a NURBS geometry
+Only implemented for curves for now 
+"""
+function nrbreverse(nrb)
+    if length(nrb.knots)==1
+        #reverse a NURBS curve
+        new_knots = sort(nrb.knots[1][end].-nrb.knots[1])
+        new_coefs = reverse(nrb.coefs, dims=2)
+        new_nrb = nrbmak(new_coefs, [new_knots])
+    end
+    return new_nrb
+end
+

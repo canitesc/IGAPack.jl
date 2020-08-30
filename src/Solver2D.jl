@@ -853,7 +853,6 @@ function applyBCnurbsElast(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rh
         end
     end
     unique!(bcdof)
-    @show bcdof
     bcval = zero(bcdof)
     rhs = rhs - lhs[:,bcdof]*bcval
     rhs[bcdof] = bcval
@@ -862,7 +861,7 @@ function applyBCnurbsElast(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rh
     lhs[bcdof, bcdof] = sparse(I, length(bcdof), length(bcdof))
     return lhs, rhs
 end
-#
+
 function applyBCnurbs(mesh::Mesh, bound_cond::Array{Boundary2D, 1}, lhs, rhs,
                         bcdof_all, elem_all, quad_rule)
     #collect the dofs and values corresponding to the boundary
@@ -987,7 +986,7 @@ function compErrorNorm(mesh::Mesh, sol0, exactSol::Function, derivExactSol::Func
 
                 dRdu = dRdu/w_sum - RR*dw_xi/w_sum^2
                 dRdv = dRdv/w_sum - RR*dw_eta/w_sum^2
-                #compute the derivatives w.r.t to the physical space
+                #compute the derivatives w.r.t. the physical space
                 dR = [dRdu'; dRdv']
 
                 dxdxi = dR * cpts'

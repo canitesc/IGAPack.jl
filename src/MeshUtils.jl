@@ -2,7 +2,7 @@ include("bernstein.jl")
 using Plots
 using LaTeXStrings
 using WriteVTK
-plotlyjs()
+plotly()
 
 mutable struct Mesh
     elemVertex::Array{Float64,2}
@@ -511,7 +511,7 @@ function plotSolError(mesh::Mesh, sol0, exactSol::Function, fileName::String)
             curNodes = mesh.elemNode[iElem]
             uMin = mesh.elemVertex[iElem, 1]
             uMax = mesh.elemVertex[iElem, 3]
-            vMin = mesh.elemVertex[iElem, 2]
+            vMin = mesh.elemVertex[iElem, 2]stressvect
             vMax = mesh.elemVertex[iElem, 4]
             cpts = mesh.controlPoints[1:2, curNodes]
             wgts = mesh.weights[curNodes]
